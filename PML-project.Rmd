@@ -1,0 +1,194 @@
+---
+title: "PML Course Project"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## How I built the model
+
+#### Setup
+
+Read in/set up the data. 
+
+```{r setupdata}
+library(caret)
+library(ElemStatLearn)
+library(AppliedPredictiveModeling)
+library(e1071)
+library(rpart)
+library(ggplot2)
+
+
+# read in
+path  <- "~/Coursera/ML/"
+project.data <- read.csv(paste0(path, "pml-training.csv"))
+project.test  <- read.csv(paste0(path, "pml-testing.csv"))
+
+# set aside validation set
+inTrain  <- createDataPartition(project.data$classe, p = 0.7, list=F)
+training <- project.data[ inTrain,]
+testing  <- project.data[-inTrain,]
+
+# explore training set
+#head(training)
+#str(training)
+#names(training)
+
+# lots of NAs
+pcentNA  <- function(df) { 
+        sapply(df, function(x) round(100*sum(is.na(x))/length(x), 1))  }
+train.na <- pcentNA(training)
+table(train.na)
+```
+
+Some variables had 98% NAs so just removed them.
+
+```{r setupNAs}
+na.vars  <- names(train.na)[train.na > 10]  # use 10% cutoff (but they're all 98)
+training <- training[,!(names(training) %in% na.vars)]
+testing  <- testing[, !(names(testing) %in% na.vars)]
+table(pcentNA(training))
+```
+
+#### Explore the data
+
+Ran summaries on the variables (code omitted).
+
+Plotted some variables against each other (code omitted).
+
+Defined which variables  related to each measurement location. 
+
+```{r explore}
+
+# subsets of variables for each measurement area
+belt.vars <- names(training)[grep("belt", names(training))]
+dbel.vars <- names(training)[grep("dumbbell", names(training))]
+farm.vars <- names(training)[grep("forearm", names(training))]
+uarm.vars <- setdiff(names(training)[grep("arm", names(training))], farm.vars)
+main.belt.vars <- belt.vars[c(1:3, grep("accel_",belt.vars))]
+main.dbel.vars <- dbel.vars[c(1:3, grep("accel_",dbel.vars))]
+main.farm.vars <- farm.vars[c(1:3, grep("accel_",farm.vars))]
+main.uarm.vars <- uarm.vars[c(1:3, grep("accel_",uarm.vars))]
+main.belt.vars
+```
+
+Ran a feature plot for these groups of variables Some (e.g. belt variables) were highly different between users.
+
+```{r fplot}
+# feature plots - some depend heavily on username
+featurePlot(x=training[,c(main.belt.vars)], y=training$user_name, plot="pairs")  # very dependent on user
+#featurePlot(x=training[,c(main.dbel.vars)], y=training$user_name, plot="pairs")  # split by user
+#featurePlot(x=training[,c(main.farm.vars)], y=training$user_name, plot="pairs")  # split by user
+#featurePlot(x=training[,c(main.uarm.vars)], y=training$user_name, plot="pairs")  # less dependency on user
+
+# try classe
+featurePlot(x=training[,c(main.belt.vars)], y=training$classe, plot="pairs")
+#featurePlot(x=training[training$user_name == "eurico",c(main.belt.vars)], 
+#            y=training[training$user_name == "eurico",]$classe, plot="pairs")
+```
+
+
+#### Identify important features
+
+Overwhelmed by number of variables (should have tried SVD). Ran a brute-force loop of decision trees, one for classe ~ each variable separately, and saved highest accuracy for that variable. Saved to file because it took awhile to run.
+
+```{r features}
+# brute-force loop of decision trees, to see which variables may be important
+#acc <- data.frame(col=names(training), accuracy=NA)
+#for(col in 1:(ncol(training)-1)){
+#        twoCols <- training[,c(names(training)[col],"classe")]
+#        acc$accuracy[col] <-
+#                max(train(classe ~ ., data=twoCols, method="rpart")$results$Accuracy)
+#}; write.csv(acc, paste0(path,"accuracy.csv"), row.names=F)
+acc <- read.csv(paste0(path,"accuracy.csv"),stringsAsFactors=F)
+acc <- acc[order(-acc$accuracy),]
+top10vars <- as.character(acc$col)[1:10]
+head(acc,10)
+```
+
+Top 10 variables included time stamp variables, "X" (row number), and window variables (unclear what these were).
+
+Due to the nature of the experiment (subjects one-by-one performed 10 reps for each lifting method class), it makes sense that time stamp thresholds would be have strong predictive ability for determining class of observations recorded within the same setup. (These would not generalize in practice!)
+
+Instead, considered the variables in the top 10 which are expected to generalize - those that are measurements from one of the 4 measurement locations. These variables still had higher inter-user variation than inter-class:
+
+```{r fplottop}
+featurePlot(x=training[,c("yaw_belt","pitch_belt","roll_belt","accel_belt_z")],
+            y=training$user_name, plot="pairs")
+featurePlot(x=training[,c("yaw_belt","pitch_belt","roll_belt","accel_belt_z")], 
+            y=training$classe, plot="pairs")
+```
+
+
+#### Model attempts
+
+Tried various non-systematic decision tree model attempts, e.g. just looking at:
+
+* Belt-related 
+    + classe ~ roll_belt + pitch_belt + yaw_belt 
+    + 39% accuracy on training set
+* User name
+    + classe ~ user_name:
+    + 28%
+* Variables which looked interesting from the feature plots
+    + classe ~ yaw_belt + accel_belt_x + accel_forearm_y + user_name 
+    + 41%
+* Variables with the top 10 highest effects:
+
+```{r model}
+cut.train <- training[,names(training) %in% c(top10vars,"classe")]
+cut.model <- train(classe ~ ., data=cut.train, method="rpart")
+cut.pred  <- predict(cut.model, training)
+sum(cut.pred == training$classe)/nrow(training)
+```
+
+Computer is ancient; boosting and random forest models just crashed it. 
+Tried Naive Bayes approach for the those "measurement" variables which seemed from earlier to have the most effect, however these were prohibitively slow and did not outperform the simple time stamp decision tree above.
+
+
+## Cross-validation
+
+I just used the caret package defaults for cross-validation.
+
+
+## Why I made the choices
+
+The dataset provided gave information (time stamp) that had strong predictive ability for the specific setup of the assignment experiment, but would not generalize in practice.
+
+Given that a simple decision tree on raw_timestamp_part_1 had 99% accuracy on the training set, for the current setup of the problem (classifying which lifting method was used for a subset of the original observations), no other models could compete in terms of both accuracy and simplicity.
+
+Clearly this method would not generalize to e.g. a new Fitbit-type technology, however I chose it for the purposes of answering the specific assignment question.
+
+Further exploration choices were made due to computational constraints.
+
+```{r final}
+# timestamp plots
+qplot(raw_timestamp_part_1, user_name, colour=classe, 
+      data=training[training$user_name=="eurico",])
+
+# build model based on time stamp
+ts.model <- train(classe ~ raw_timestamp_part_1, data=training, method="rpart")
+ts.pred  <- predict(ts.model, training)
+sum(ts.pred == training$classe)/nrow(training)
+```
+
+
+## Expected out of sample error
+
+Expected out of sample accuracy is ~99%, so OOS error is 1%:
+```{r oos}
+# build model based on time stamp
+ts.pred2 <- predict(ts.model, testing)
+sum(ts.pred2 == testing$classe)/nrow(testing)
+
+# submit results for quiz
+ts.pred.test <- predict(ts.model, project.test)
+submit <- data.frame(problem_id=project.test$problem_id, pred=ts.pred.test)
+```
+
+Thank you.
+
+***
